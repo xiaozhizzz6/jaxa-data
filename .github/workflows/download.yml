@@ -16,25 +16,33 @@ jobs:
     - name: Download CLP 30min
       run: |
         python3 -u << 'PYEOF'
-        import os, sys, ftplib
+        import os, sys, ftplib, time
 
         Y = "${{ github.event.inputs.year }}"
         M = "${{ github.event.inputs.month }}"
-        HOST = "ftp.ptree.jaxa.jp"
-        USER = "${{ secrets.JAXA_USER }}"
-        PASS = "${{ secrets.JAXA_PASS }}"
+        H = "ftp.ptree.jaxa.jp"
+        U = "${{ secrets.JAXA_USER }}"
+        P = "${{ secrets.JAXA_PASS }}"
         BASE = f"/pub/himawari/L2/CLP/010/{Y}{M}"
 
-        ftp = ftplib.FTP()
-        ftp.connect(HOST, 21, timeout=30)
-        ftp.login(USER, PASS)
-        ftp.voidcmd('TYPE I')
-        print(f"Connected. Listing {Y}/{M}...")
+        def connect():
+            for _ in range(3):
+                try:
+                    f = ftplib.FTP()
+                    f.connect(H, 21, timeout=30)
+                    f.login(U, P)
+                    f.voidcmd('TYPE I')
+                    return f
+                except:
+                    time.sleep(5)
+            raise Exception("Cannot connect")
 
+        ftp = connect()
+        print(f"Connected. {Y}/{M}")
+
+        # 获取所有文件路径
+        todo = []
         days = sorted(ftp.nlst(BASE))
-        print(f"Days: {len(days)}")
-
-        n = ok = 0
         for day_path in days:
             day = os.path.basename(day_path)
             for hour in sorted(ftp.nlst(f"{BASE}/{day}")):
@@ -42,24 +50,35 @@ jobs:
                 for fpath in ftp.nlst(f"{BASE}/{day}/{hh}"):
                     fname = os.path.basename(fpath)
                     parts = fname.split('_')
-                    if len(parts) < 4: continue
-                    minute = parts[3][-2:]
-                    if minute not in ('00','30'): continue
+                    if len(parts) >= 4 and parts[3][-2:] in ('00','30'):
+                        todo.append((fpath, f"data/{Y}{M}/{day}/{hh}/{fname}"))
 
-                    local = f"data/{Y}{M}/{day}/{hh}/{fname}"
-                    os.makedirs(os.path.dirname(local), exist_ok=True)
+        print(f"Files to download: {len(todo)}")
 
-                    try:
-                        with open(local, 'wb') as f:
-                            ftp.retrbinary(f'RETR {fpath}', f.write)
-                        ok += 1
-                    except: pass
-                    n += 1
-            print(f"  {day}: {ok}/{n}", flush=True)
+        ok = fail = 0
+        for i, (remote, local) in enumerate(todo):
+            os.makedirs(os.path.dirname(local), exist_ok=True)
+
+            for attempt in range(3):
+                try:
+                    with open(local, 'wb') as f:
+                        ftp.retrbinary(f'RETR {remote}', f.write)
+                    ok += 1
+                    break
+                except:
+                    if attempt < 2:
+                        try: ftp.quit()
+                        except: pass
+                        ftp = connect()
+                    else:
+                        fail += 1
+
+            if (i+1) % 48 == 0 or i == len(todo)-1:
+                print(f"  [{i+1}/{len(todo)}] ok={ok} fail={fail}", flush=True)
 
         ftp.quit()
         total = sum(os.path.getsize(os.path.join(r,f)) for r,_,fs in os.walk('data') for f in fs)
-        print(f"DONE! {ok} files, {total/1e9:.1f} GB")
+        print(f"DONE! ok={ok} fail={fail}  size={total/1e9:.1f}GB")
         PYEOF
 
     - name: Zip & Upload
@@ -72,3 +91,4 @@ jobs:
         name: CLP_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
         path: CLP_*.zip
         retention-days: 7
+
