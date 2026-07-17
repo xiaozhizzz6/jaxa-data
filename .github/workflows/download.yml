@@ -19,7 +19,7 @@ jobs:
     steps:
     - name: Download data via FTP
       run: |
-        python3 -c "
+        python3 -u-c "
         import os, ftplib, sys
         from pathlib import Path
 
