@@ -1,5 +1,3 @@
-name: Download JAXA Himawari Data
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,76 +6,48 @@ on:
         required: true
         default: '2016'
       month:
-        description: 'Month (e.g. 03)'
+        description: 'Month (e.g. 04)'
         required: true
-        default: '03'
+        default: '04'
 
 jobs:
   download:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-    - name: Download data via FTP
-      run: |
-        python3 -u-c "
-        import os, ftplib, sys
-        from pathlib import Path
+    - name: Install lftp
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
 
-        YEAR = '${{ github.event.inputs.year }}'
-        MONTH = '${{ github.event.inputs.month }}'
-        HOST = 'ftp.ptree.jaxa.jp'
-        USER = '${{ secrets.JAXA_USER }}'
-        PASS = '${{ secrets.JAXA_PASS }}'
-
-        ftp = ftplib.FTP()
-        ftp.connect(HOST, 21, timeout=30)
-        ftp.login(USER, PASS)
-        ftp.voidcmd('TYPE I')
-        print(f'Connected to {HOST}')
-
-        # 列出该月所有天
-        month_path = f'/pub/himawari/L2/CLP/010/{YEAR}{MONTH}'
-        days = sorted(ftp.nlst(month_path))
-        print(f'Found {len(days)} days in {YEAR}/{MONTH}')
-
-        total = 0
-        for day_path in days:
-            day = os.path.basename(day_path)
-            hours = sorted(ftp.nlst(f'{month_path}/{day}'))
-            for hour_path in hours:
-                hour = os.path.basename(hour_path)
-                files = ftp.nlst(f'{month_path}/{day}/{hour}')
-                for fpath in files:
-                    fname = os.path.basename(fpath)
-                    local = f'data/{YEAR}{MONTH}/{day}/{hour}/{fname}'
-                    Path(local).parent.mkdir(parents=True, exist_ok=True)
-
-                    if os.path.exists(local) and os.path.getsize(local) > 0:
-                        continue
-
-                    try:
-                        with open(local, 'wb') as f:
-                            ftp.retrbinary(f'RETR {fpath}', f.write)
-                        total += 1
-                    except:
-                        pass
-
-            print(f'  {YEAR}/{MONTH}/{day}: cumulative {total} files')
-
-        ftp.quit()
-        print(f'Done! {total} files downloaded.')
-        "
-
-    - name: Package and upload
+    - name: Download Himawari L2 Cloud Data
       run: |
         YEAR=${{ github.event.inputs.year }}
         MONTH=${{ github.event.inputs.month }}
-        cd data
-        zip -r ../himawari_${YEAR}${MONTH}.zip ${YEAR}${MONTH}/
-        cd ..
+
+        echo "=== Downloading ${YEAR}/${MONTH} ==="
+
+        lftp -u "${{ secrets.JAXA_USER }},${{ secrets.JAXA_PASS }}" ftp.ptree.jaxa.jp <<EOF
+        set ftp:ssl-allow no
+        set mirror:parallel-transfer-count 2
+        set xfer:log true
+        set xfer:log-file /tmp/lftp.log
+        mirror --verbose --parallel=2 \
+          /pub/himawari/L2/CLP/010/${YEAR}${MONTH}/ \
+          ./data/${YEAR}${MONTH}/
+        quit
+        EOF
+
+        echo "=== Done ==="
+        echo "Files: $(find ./data/ -name '*.nc' | wc -l)"
+        echo "Size:  $(du -sh ./data/ | cut -f1)"
+
+    - name: Create ZIP
+      run: |
+        YEAR=${{ github.event.inputs.year }}
+        MONTH=${{ github.event.inputs.month }}
+        cd data && zip -r ../himawari_${YEAR}${MONTH}.zip . && cd ..
         ls -lh himawari_*.zip
 
-    - name: Upload artifact
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
         name: himawari_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
