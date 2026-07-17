@@ -4,10 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       year:
-        description: 'Year'
         default: '2016'
       month:
-        description: 'Month (e.g. 04)'
         default: '04'
 
 jobs:
@@ -15,51 +13,65 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-    - name: Download
+    - name: Download via Python FTP
       run: |
-        YEAR="${{ github.event.inputs.year }}"
-        MONTH="${{ github.event.inputs.month }}"
-        USER="${{ secrets.JAXA_USER }}"
-        PASS="${{ secrets.JAXA_PASS }}"
-        HOST="ftp.ptree.jaxa.jp"
-        BASE="/pub/himawari/L2/CLP/010/${YEAR}${MONTH}"
+        python3 -u << 'PYEOF'
+        import os, sys, ftplib, time
 
-        # 先列目录确认存在
-        echo "=== 列出 ${YEAR}${MONTH} 的日期 ==="
-        curl -s --user "${USER}:${PASS}" "ftp://${HOST}${BASE}/" 2>&1
-        echo ""
-        echo "=================================="
+        YEAR = "${{ github.event.inputs.year }}"
+        MONTH = "${{ github.event.inputs.month }}"
+        HOST = "ftp.ptree.jaxa.jp"
+        USER = "${{ secrets.JAXA_USER }}"
+        PASS = "${{ secrets.JAXA_PASS }}"
+        BASE = f"/pub/himawari/L2/CLP/010/{YEAR}{MONTH}"
 
-        n=0; fail=0
-        for day in {01..31}; do
-          for hour in {00..23}; do
-            for min in 00 30; do
-              fname="NC_H08_${YEAR}${MONTH}${day}_${hour}${min}_L2CLP010_FLDK.02401_02401.nc"
-              remote="ftp://${HOST}${BASE}/${day}/${hour}/${fname}"
-              local_path="data/${YEAR}${MONTH}/${day}/${hour}"
-              mkdir -p "$local_path"
+        ftp = ftplib.FTP()
+        ftp.connect(HOST, 21, timeout=30)
+        ftp.login(USER, PASS)
+        ftp.voidcmd('TYPE I')
+        print(f"Connected to {HOST}")
 
-              # 用 curl 下载, 超时15秒, 失败不重试
-              http_code=$(curl -s -o "${local_path}/${fname}" \
-                -w "%{http_code}" --max-time 15 \
-                --user "${USER}:${PASS}" "$remote" 2>/dev/null)
+        # 列出存在的日期
+        try:
+            days = sorted(ftp.nlst(BASE))
+            print(f"Found {len(days)} days: {days}")
+        except:
+            print(f"Cannot list {BASE}")
+            ftp.quit()
+            sys.exit(1)
 
-              if [ "$http_code" = "226" ] || [ "$http_code" = "200" ]; then
-                n=$((n+1))
-              else
-                fail=$((fail+1))
-                rm -f "${local_path}/${fname}"
-              fi
+        n = 0
+        fail = 0
+        for day_path in days:
+            day = os.path.basename(day_path)
+            hours = sorted(ftp.nlst(f"{BASE}/{day}"))
+            for hour_path in hours:
+                hour = os.path.basename(hour_path)
+                files = ftp.nlst(f"{BASE}/{day}/{hour}")
+                for fpath in files:
+                    fname = os.path.basename(fpath)
+                    local = f"data/{YEAR}{MONTH}/{day}/{hour}/{fname}"
+                    os.makedirs(os.path.dirname(local), exist_ok=True)
 
-              if [ $(( (n+fail) % 48 )) -eq 0 ]; then
-                echo "[${YEAR}-${MONTH}-${day} ${hour}:${min}] done: $n / fail: $fail"
-              fi
-            done
-          done
-        done
+                    try:
+                        with open(local, 'wb') as f:
+                            ftp.retrbinary(f'RETR {fpath}', f.write)
+                        n += 1
+                    except Exception as e:
+                        fail += 1
 
-        echo "=================================="
-        echo "DONE! Downloaded: $n  Failed: $fail"
+            print(f"  {day}: {n} downloaded, {fail} failed", flush=True)
+
+        ftp.quit()
+        print(f"DONE! {n} files, {fail} failed")
+
+        # 检查大小
+        total = 0
+        for root, dirs, files in os.walk('data'):
+            for f in files:
+                total += os.path.getsize(os.path.join(root, f))
+        print(f"Total size: {total/1e9:.2f} GB")
+        PYEOF
 
     - name: Zip
       run: |
@@ -72,3 +84,4 @@ jobs:
         name: himawari_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
         path: himawari.zip
         retention-days: 7
+
