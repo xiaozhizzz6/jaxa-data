@@ -1,13 +1,13 @@
+name: Download JAXA Himawari Data
+
 on:
   workflow_dispatch:
     inputs:
       year:
-        description: 'Year (e.g. 2016)'
-        required: true
+        description: 'Year'
         default: '2016'
       month:
         description: 'Month (e.g. 04)'
-        required: true
         default: '04'
 
 jobs:
@@ -15,41 +15,60 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-    - name: Install lftp
-      run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
-
-    - name: Download Himawari L2 Cloud Data
+    - name: Download
       run: |
-        YEAR=${{ github.event.inputs.year }}
-        MONTH=${{ github.event.inputs.month }}
+        YEAR="${{ github.event.inputs.year }}"
+        MONTH="${{ github.event.inputs.month }}"
+        USER="${{ secrets.JAXA_USER }}"
+        PASS="${{ secrets.JAXA_PASS }}"
+        HOST="ftp.ptree.jaxa.jp"
+        BASE="/pub/himawari/L2/CLP/010/${YEAR}${MONTH}"
 
-        echo "=== Downloading ${YEAR}/${MONTH} ==="
+        # 先列目录确认存在
+        echo "=== 列出 ${YEAR}${MONTH} 的日期 ==="
+        curl -s --user "${USER}:${PASS}" "ftp://${HOST}${BASE}/" 2>&1
+        echo ""
+        echo "=================================="
 
-        lftp -u "${{ secrets.JAXA_USER }},${{ secrets.JAXA_PASS }}" ftp.ptree.jaxa.jp <<EOF
-        set ftp:ssl-allow no
-        set mirror:parallel-transfer-count 2
-        set xfer:log true
-        set xfer:log-file /tmp/lftp.log
-        mirror --verbose --parallel=2 \
-          /pub/himawari/L2/CLP/010/${YEAR}${MONTH}/ \
-          ./data/${YEAR}${MONTH}/
-        quit
-        EOF
+        n=0; fail=0
+        for day in {01..31}; do
+          for hour in {00..23}; do
+            for min in 00 30; do
+              fname="NC_H08_${YEAR}${MONTH}${day}_${hour}${min}_L2CLP010_FLDK.02401_02401.nc"
+              remote="ftp://${HOST}${BASE}/${day}/${hour}/${fname}"
+              local_path="data/${YEAR}${MONTH}/${day}/${hour}"
+              mkdir -p "$local_path"
 
-        echo "=== Done ==="
-        echo "Files: $(find ./data/ -name '*.nc' | wc -l)"
-        echo "Size:  $(du -sh ./data/ | cut -f1)"
+              # 用 curl 下载, 超时15秒, 失败不重试
+              http_code=$(curl -s -o "${local_path}/${fname}" \
+                -w "%{http_code}" --max-time 15 \
+                --user "${USER}:${PASS}" "$remote" 2>/dev/null)
 
-    - name: Create ZIP
+              if [ "$http_code" = "226" ] || [ "$http_code" = "200" ]; then
+                n=$((n+1))
+              else
+                fail=$((fail+1))
+                rm -f "${local_path}/${fname}"
+              fi
+
+              if [ $(( (n+fail) % 48 )) -eq 0 ]; then
+                echo "[${YEAR}-${MONTH}-${day} ${hour}:${min}] done: $n / fail: $fail"
+              fi
+            done
+          done
+        done
+
+        echo "=================================="
+        echo "DONE! Downloaded: $n  Failed: $fail"
+
+    - name: Zip
       run: |
-        YEAR=${{ github.event.inputs.year }}
-        MONTH=${{ github.event.inputs.month }}
-        cd data && zip -r ../himawari_${YEAR}${MONTH}.zip . && cd ..
-        ls -lh himawari_*.zip
+        cd data && zip -r ../himawari.zip . && cd ..
+        ls -lh himawari.zip
 
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
         name: himawari_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
-        path: himawari_*.zip
+        path: himawari.zip
         retention-days: 7
