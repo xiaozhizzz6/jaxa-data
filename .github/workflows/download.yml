@@ -1,4 +1,4 @@
-name: Download JAXA Himawari Data
+name: Download JAXA CLP Data (30min)
 
 on:
   workflow_dispatch:
@@ -13,75 +13,62 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-    - name: Download via Python FTP
+    - name: Download CLP 30min
       run: |
         python3 -u << 'PYEOF'
-        import os, sys, ftplib, time
+        import os, sys, ftplib
 
-        YEAR = "${{ github.event.inputs.year }}"
-        MONTH = "${{ github.event.inputs.month }}"
+        Y = "${{ github.event.inputs.year }}"
+        M = "${{ github.event.inputs.month }}"
         HOST = "ftp.ptree.jaxa.jp"
         USER = "${{ secrets.JAXA_USER }}"
         PASS = "${{ secrets.JAXA_PASS }}"
-        BASE = f"/pub/himawari/L2/CLP/010/{YEAR}{MONTH}"
+        BASE = f"/pub/himawari/L2/CLP/010/{Y}{M}"
 
         ftp = ftplib.FTP()
         ftp.connect(HOST, 21, timeout=30)
         ftp.login(USER, PASS)
         ftp.voidcmd('TYPE I')
-        print(f"Connected to {HOST}")
+        print(f"Connected. Listing {Y}/{M}...")
 
-        # 列出存在的日期
-        try:
-            days = sorted(ftp.nlst(BASE))
-            print(f"Found {len(days)} days: {days}")
-        except:
-            print(f"Cannot list {BASE}")
-            ftp.quit()
-            sys.exit(1)
+        days = sorted(ftp.nlst(BASE))
+        print(f"Days: {len(days)}")
 
-        n = 0
-        fail = 0
+        n = ok = 0
         for day_path in days:
             day = os.path.basename(day_path)
-            hours = sorted(ftp.nlst(f"{BASE}/{day}"))
-            for hour_path in hours:
-                hour = os.path.basename(hour_path)
-                files = ftp.nlst(f"{BASE}/{day}/{hour}")
-                for fpath in files:
+            for hour in sorted(ftp.nlst(f"{BASE}/{day}")):
+                hh = os.path.basename(hour)
+                for fpath in ftp.nlst(f"{BASE}/{day}/{hh}"):
                     fname = os.path.basename(fpath)
-                    local = f"data/{YEAR}{MONTH}/{day}/{hour}/{fname}"
+                    parts = fname.split('_')
+                    if len(parts) < 4: continue
+                    minute = parts[3][-2:]
+                    if minute not in ('00','30'): continue
+
+                    local = f"data/{Y}{M}/{day}/{hh}/{fname}"
                     os.makedirs(os.path.dirname(local), exist_ok=True)
 
                     try:
                         with open(local, 'wb') as f:
                             ftp.retrbinary(f'RETR {fpath}', f.write)
-                        n += 1
-                    except Exception as e:
-                        fail += 1
-
-            print(f"  {day}: {n} downloaded, {fail} failed", flush=True)
+                        ok += 1
+                    except: pass
+                    n += 1
+            print(f"  {day}: {ok}/{n}", flush=True)
 
         ftp.quit()
-        print(f"DONE! {n} files, {fail} failed")
-
-        # 检查大小
-        total = 0
-        for root, dirs, files in os.walk('data'):
-            for f in files:
-                total += os.path.getsize(os.path.join(root, f))
-        print(f"Total size: {total/1e9:.2f} GB")
+        total = sum(os.path.getsize(os.path.join(r,f)) for r,_,fs in os.walk('data') for f in fs)
+        print(f"DONE! {ok} files, {total/1e9:.1f} GB")
         PYEOF
 
-    - name: Zip
+    - name: Zip & Upload
       run: |
-        cd data && zip -r ../himawari.zip . && cd ..
-        ls -lh himawari.zip
+        cd data && zip -r ../CLP_${{ github.event.inputs.year }}${{ github.event.inputs.month }}.zip . && cd ..
+        ls -lh *.zip
 
-    - name: Upload
-      uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v4
       with:
-        name: himawari_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
-        path: himawari.zip
+        name: CLP_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
+        path: CLP_*.zip
         retention-days: 7
-
