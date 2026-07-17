@@ -16,7 +16,7 @@ jobs:
     - name: Download CLP 30min
       run: |
         python3 -u << 'PYEOF'
-        import os, sys, ftplib, time
+        import os, ftplib, time
 
         Y = "${{ github.event.inputs.year }}"
         M = "${{ github.event.inputs.month }}"
@@ -38,53 +38,56 @@ jobs:
             raise Exception("Cannot connect")
 
         ftp = connect()
-        print(f"Connected. {Y}/{M}")
+        print(f"Connected. Downloading {Y}/{M}")
 
-        # 获取所有文件路径
-        todo = []
-        days = sorted(ftp.nlst(BASE))
-        for day_path in days:
-            day = os.path.basename(day_path)
-            for hour in sorted(ftp.nlst(f"{BASE}/{day}")):
-                hh = os.path.basename(hour)
-                for fpath in ftp.nlst(f"{BASE}/{day}/{hh}"):
-                    fname = os.path.basename(fpath)
-                    parts = fname.split('_')
-                    if len(parts) >= 4 and parts[3][-2:] in ('00','30'):
-                        todo.append((fpath, f"data/{Y}{M}/{day}/{hh}/{fname}"))
+        # 直接从文件名构造, 不列目录
+        days_in_month = {'01':31,'02':28,'03':31,'04':30,'05':31,'06':30,
+                         '07':31,'08':31,'09':30,'10':31,'11':30,'12':31}
+        max_day = days_in_month.get(M, 30)
 
-        print(f"Files to download: {len(todo)}")
+        ok = fail = skip = 0
+        for day in range(1, max_day+1):
+            for hour in range(24):
+                for minute in (0, 30):
+                    fname = f"NC_H08_{Y}{M}{day:02d}_{hour:02d}{minute:02d}_L2CLP010_FLDK.02401_02401.nc"
+                    remote = f"{BASE}/{day:02d}/{hour:02d}/{fname}"
+                    local = f"data/{Y}{M}/{day:02d}/{hour:02d}/{fname}"
+                    os.makedirs(os.path.dirname(local), exist_ok=True)
 
-        ok = fail = 0
-        for i, (remote, local) in enumerate(todo):
-            os.makedirs(os.path.dirname(local), exist_ok=True)
+                    # 尝试下载, 文件不存在则跳过
+                    for attempt in range(2):
+                        try:
+                            with open(local, 'wb') as f:
+                                ftp.retrbinary(f'RETR {remote}', f.write, blocksize=8192)
+                            ok += 1
+                            break
+                        except ftplib.error_perm:
+                            skip += 1  # 文件不存在, 正常
+                            break
+                        except:
+                            if attempt == 0:
+                                try: ftp.quit()
+                                except: pass
+                                ftp = connect()
+                            else:
+                                fail += 1
+                                if os.path.exists(local):
+                                    os.remove(local)
 
-            for attempt in range(3):
-                try:
-                    with open(local, 'wb') as f:
-                        ftp.retrbinary(f'RETR {remote}', f.write)
-                    ok += 1
-                    break
-                except:
-                    if attempt < 2:
-                        try: ftp.quit()
-                        except: pass
-                        ftp = connect()
-                    else:
-                        fail += 1
-
-            if (i+1) % 48 == 0 or i == len(todo)-1:
-                print(f"  [{i+1}/{len(todo)}] ok={ok} fail={fail}", flush=True)
+            print(f"  {day:02d}: ok={ok} fail={fail} skip={skip}", flush=True)
 
         ftp.quit()
-        total = sum(os.path.getsize(os.path.join(r,f)) for r,_,fs in os.walk('data') for f in fs)
-        print(f"DONE! ok={ok} fail={fail}  size={total/1e9:.1f}GB")
+        total = 0
+        for r,_,fs in os.walk('data'):
+            for f in fs:
+                total += os.path.getsize(os.path.join(r,f))
+        print(f"DONE! {ok} files, {total/1e9:.1f} GB")
         PYEOF
 
     - name: Zip & Upload
       run: |
         cd data && zip -r ../CLP_${{ github.event.inputs.year }}${{ github.event.inputs.month }}.zip . && cd ..
-        ls -lh *.zip
+        ls -lh CLP_*.zip
 
     - uses: actions/upload-artifact@v4
       with:
