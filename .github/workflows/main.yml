@@ -1,0 +1,86 @@
+name: Download JAXA Himawari Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        default: '2016'
+      month:
+        default: '04'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+    - name: Download via Python FTP
+      run: |
+        python3 -u << 'PYEOF'
+        import os, sys, ftplib, time
+
+        YEAR = "${{ github.event.inputs.year }}"
+        MONTH = "${{ github.event.inputs.month }}"
+        HOST = "ftp.ptree.jaxa.jp"
+        USER = "${{ secrets.JAXA_USER }}"
+        PASS = "${{ secrets.JAXA_PASS }}"
+        BASE = f"/pub/himawari/L2/CLP/010/{YEAR}{MONTH}"
+
+        ftp = ftplib.FTP()
+        ftp.connect(HOST, 21, timeout=30)
+        ftp.login(USER, PASS)
+        ftp.voidcmd('TYPE I')
+        print(f"Connected to {HOST}")
+
+        # 列出存在的日期
+        try:
+            days = sorted(ftp.nlst(BASE))
+            print(f"Found {len(days)} days: {days}")
+        except:
+            print(f"Cannot list {BASE}")
+            ftp.quit()
+            sys.exit(1)
+
+        n = 0
+        fail = 0
+        for day_path in days:
+            day = os.path.basename(day_path)
+            hours = sorted(ftp.nlst(f"{BASE}/{day}"))
+            for hour_path in hours:
+                hour = os.path.basename(hour_path)
+                files = ftp.nlst(f"{BASE}/{day}/{hour}")
+                for fpath in files:
+                    fname = os.path.basename(fpath)
+                    local = f"data/{YEAR}{MONTH}/{day}/{hour}/{fname}"
+                    os.makedirs(os.path.dirname(local), exist_ok=True)
+
+                    try:
+                        with open(local, 'wb') as f:
+                            ftp.retrbinary(f'RETR {fpath}', f.write)
+                        n += 1
+                    except Exception as e:
+                        fail += 1
+
+            print(f"  {day}: {n} downloaded, {fail} failed", flush=True)
+
+        ftp.quit()
+        print(f"DONE! {n} files, {fail} failed")
+
+        # 检查大小
+        total = 0
+        for root, dirs, files in os.walk('data'):
+            for f in files:
+                total += os.path.getsize(os.path.join(root, f))
+        print(f"Total size: {total/1e9:.2f} GB")
+        PYEOF
+
+    - name: Zip
+      run: |
+        cd data && zip -r ../himawari.zip . && cd ..
+        ls -lh himawari.zip
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: himawari_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
+        path: himawari.zip
+        retention-days: 7
