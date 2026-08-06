@@ -1,97 +1,81 @@
-name: Download JAXA CLP Data (30min)
+name: Download ALL CLP 2021-2026 (30min)
 
 on:
-  workflow_dispatch:
-    inputs:
-      year:
-        default: '2016'
-      month:
-        default: '04'
+  workflow_dispatch:  # 点一下就行
 
 jobs:
   download:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      matrix:
+        batch: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21]
+      max-parallel: 3  # 3个并行任务，不超FTP限制
     steps:
-    - name: Download CLP 30min
+    - name: Download batch ${{ matrix.batch }}
       run: |
         python3 -u << 'PYEOF'
         import os, ftplib, time
 
-        Y = "${{ github.event.inputs.year }}"
-        M = "${{ github.event.inputs.month }}"
-        H = "ftp.ptree.jaxa.jp"
-        U = "${{ secrets.JAXA_USER }}"
-        P = "${{ secrets.JAXA_PASS }}"
-        BASE = f"/pub/himawari/L2/CLP/010/{Y}{M}"
+        # 所有月份
+        months = []
+        for y in range(2021, 2027):
+            end = 13 if y < 2026 else 6
+            for m in range(1, end):
+                months.append(f"{y}{m:02d}")
+        # 每个batch处理3个月
+        BATCH = ${{ matrix.batch }}
+        my_months = months[BATCH*3 : BATCH*3+3]
+        if not my_months:
+            print(f"Batch {BATCH}: nothing to do")
+            exit(0)
+        print(f"Batch {BATCH}: {my_months}")
 
-        def connect():
-            for _ in range(3):
-                try:
-                    f = ftplib.FTP()
-                    f.connect(H, 21, timeout=30)
-                    f.login(U, P)
-                    f.voidcmd('TYPE I')
-                    return f
-                except:
-                    time.sleep(5)
-            raise Exception("Cannot connect")
+        HOST = "ftp.ptree.jaxa.jp"
+        ftp = ftplib.FTP()
+        ftp.connect(HOST, 21, timeout=30)
+        ftp.login("${{ secrets.JAXA_USER }}", "${{ secrets.JAXA_PASS }}")
+        ftp.voidcmd("TYPE I")
 
-        ftp = connect()
-        print(f"Connected. Downloading {Y}/{M}")
-
-        # 直接从文件名构造, 不列目录
-        days_in_month = {'01':31,'02':28,'03':31,'04':30,'05':31,'06':30,
-                         '07':31,'08':31,'09':30,'10':31,'11':30,'12':31}
-        max_day = days_in_month.get(M, 30)
-
-        ok = fail = skip = 0
-        for day in range(1, max_day+1):
-            for hour in range(24):
-                for minute in (0, 30):
-                    fname = f"NC_H08_{Y}{M}{day:02d}_{hour:02d}{minute:02d}_L2CLP010_FLDK.02401_02401.nc"
-                    remote = f"{BASE}/{day:02d}/{hour:02d}/{fname}"
-                    local = f"data/{Y}{M}/{day:02d}/{hour:02d}/{fname}"
-                    os.makedirs(os.path.dirname(local), exist_ok=True)
-
-                    # 尝试下载, 文件不存在则跳过
-                    for attempt in range(2):
-                        try:
-                            with open(local, 'wb') as f:
-                                ftp.retrbinary(f'RETR {remote}', f.write, blocksize=8192)
-                            ok += 1
-                            break
-                        except ftplib.error_perm:
-                            skip += 1  # 文件不存在, 正常
-                            break
-                        except:
-                            if attempt == 0:
-                                try: ftp.quit()
-                                except: pass
-                                ftp = connect()
-                            else:
-                                fail += 1
-                                if os.path.exists(local):
-                                    os.remove(local)
-
-            print(f"  {day:02d}: ok={ok} fail={fail} skip={skip}", flush=True)
+        ok = skip = fail = 0
+        for YM in my_months:
+            BASE = f"/pub/himawari/L2/CLP/010/{YM}"
+            for day in range(1, 32):
+                for hour in range(24):
+                    for minute in (0, 30):
+                        fn = f"NC_H08_{YM}{day:02d}_{hour:02d}{minute:02d}_L2CLP010_FLDK.02401_02401.nc"
+                        remote = f"{BASE}/{day:02d}/{hour:02d}/{fn}"
+                        local = f"data/{YM}/{day:02d}/{hour:02d}/{fn}"
+                        os.makedirs(os.path.dirname(local), exist_ok=True)
+                        for att in range(2):
+                            try:
+                                with open(local, "wb") as f:
+                                    ftp.retrbinary(f"RETR {remote}", f.write, 8192)
+                                ok += 1; break
+                            except ftplib.error_perm:
+                                skip += 1; break
+                            except:
+                                if att == 0:
+                                    try: ftp.quit()
+                                    except: pass; time.sleep(3)
+                                    ftp = ftplib.FTP(); ftp.connect(HOST,21,timeout=30)
+                                    ftp.login("${{ secrets.JAXA_USER }}", "${{ secrets.JAXA_PASS }}")
+                                    ftp.voidcmd("TYPE I")
+                                else: fail += 1
+            print(f"  {YM} ok={ok} skip={skip}", flush=True)
 
         ftp.quit()
-        total = 0
-        for r,_,fs in os.walk('data'):
-            for f in fs:
-                total += os.path.getsize(os.path.join(r,f))
-        print(f"DONE! {ok} files, {total/1e9:.1f} GB")
+        total = sum(os.path.getsize(os.path.join(r,fl)) for r,_,fs in os.walk("data") for fl in fs)
+        print(f"Batch {BATCH} DONE: {ok} files, {total/1e9:.1f} GB")
         PYEOF
 
-    - name: Zip & Upload
+    - name: Zip batch ${{ matrix.batch }}
       run: |
-        cd data && zip -r ../CLP_${{ github.event.inputs.year }}${{ github.event.inputs.month }}.zip . && cd ..
+        cd data && zip -r ../CLP_batch${{ matrix.batch }}.zip . && cd ..
         ls -lh CLP_*.zip
 
     - uses: actions/upload-artifact@v4
       with:
-        name: CLP_${{ github.event.inputs.year }}${{ github.event.inputs.month }}
-        path: CLP_*.zip
-        retention-days: 7
-
+        name: CLP_batch${{ matrix.batch }}
+        path: CLP_batch${{ matrix.batch }}.zip
+        retention-days: 5
