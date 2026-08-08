@@ -1,4 +1,4 @@
-name: Retry CLP Failed Batches (b47-b113, b118-b129)
+name: Retry CLP Failed Batches (H08+H09 fix)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,6 @@ jobs:
         print(f"Batch {BATCH}: {YM} days {d_start}-{d_end}")
         HOST = "ftp.ptree.jaxa.jp"
 
-        # 尝试3次重连
         for connect_attempt in range(3):
             try:
                 ftp = ftplib.FTP()
@@ -49,56 +48,72 @@ jobs:
                 time.sleep(10)
 
         ok = skip = fail = 0
-        empty_ok = 0
         BASE = f"/pub/himawari/L2/CLP/010/{YM}"
+        # Himawari-8 -> Himawari-9 transition on 2022-12-13
+        TRANSITION = 20221213
+
         for day in range(d_start, d_end + 1):
             for hour in range(24):
                 for minute in (0, 30):
-                    fn = f"NC_H08_{YM}{day:02d}_{hour:02d}{minute:02d}_L2CLP010_FLDK.02401_02401.nc"
-                    remote = f"{BASE}/{day:02d}/{hour:02d}/{fn}"
-                    local = f"data/{YM}/{day:02d}/{hour:02d}/{fn}"
-                    os.makedirs(os.path.dirname(local), exist_ok=True)
-                    for att in range(2):
-                        try:
-                            with open(local, "wb") as f:
-                                ftp.retrbinary(f"RETR {remote}", f.write, 8192)
-                            sz = os.path.getsize(local)
-                            if sz > 0:
-                                ok += 1
-                            else:
-                                empty_ok += 1
+                    date_int = int(f"{YM}{day:02d}")
+                    # Determine primary satellite
+                    primary = "H09" if date_int >= TRANSITION else "H08"
+                    fallback = "H08" if primary == "H09" else "H09"
+                    downloaded = False
+
+                    for sat in (primary, fallback):
+                        if downloaded:
                             break
-                        except ftplib.error_perm:
-                            skip += 1
-                            try: os.remove(local)
-                            except: pass
-                            break
-                        except Exception as e:
-                            if att == 0:
-                                try: ftp.quit()
-                                except: pass
-                                time.sleep(5)
-                                # 重连
-                                for ca2 in range(3):
-                                    try:
-                                        ftp = ftplib.FTP()
-                                        ftp.connect(HOST, 21, timeout=60)
-                                        ftp.login("${{ secrets.JAXA_USER }}", "${{ secrets.JAXA_PASS }}")
-                                        ftp.voidcmd("TYPE I")
-                                        ftp.set_pasv(True)
-                                        break
-                                    except:
-                                        if ca2 == 2:
-                                            fail += 1
-                                            try: os.remove(local)
-                                            except: pass
-                                        else:
-                                            time.sleep(5)
-                            else:
-                                fail += 1
+                        fn = f"NC_{sat}_{YM}{day:02d}_{hour:02d}{minute:02d}_L2CLP010_FLDK.02401_02401.nc"
+                        remote = f"{BASE}/{day:02d}/{hour:02d}/{fn}"
+                        local = f"data/{YM}/{day:02d}/{hour:02d}/{fn}"
+                        os.makedirs(os.path.dirname(local), exist_ok=True)
+
+                        for att in range(2):
+                            try:
+                                with open(local, "wb") as f:
+                                    ftp.retrbinary(f"RETR {remote}", f.write, 8192)
+                                sz = os.path.getsize(local)
+                                if sz > 0:
+                                    ok += 1
+                                    downloaded = True
+                                else:
+                                    os.remove(local)
+                                break
+                            except ftplib.error_perm:
+                                # File not found, try fallback satellite
                                 try: os.remove(local)
                                 except: pass
-            if ok % 50 == 0:
+                                break
+                            except Exception as e:
+                                if att == 0:
+                                    try: ftp.quit()
+                                    except: pass
+                                    time.sleep(5)
+                                    for ca2 in range(3):
+                                        try:
+                                            ftp = ftplib.FTP()
+                                            ftp.connect(HOST, 21, timeout=60)
+                                            ftp.login("${{ secrets.JAXA_USER }}", "${{ secrets.JAXA_PASS }}")
+                                            ftp.voidcmd("TYPE I")
+                                            ftp.set_pasv(True)
+                                            break
+                                        except:
+                                            if ca2 == 2:
+                                                fail += 1
+                                                try: os.remove(local)
+                                                except: pass
+                                            else:
+                                                time.sleep(5)
+                                else:
+                                    fail += 1
+                                    try: os.remove(local)
+                                    except: pass
+
+                    if not downloaded:
+                        skip += 1
+
+            if day % 3 == 0:
                 print(f"  {YM} d{day:02d} ok={ok} skip={skip} fail={fail}", flush=True)
 
         try: ftp.quit()
@@ -108,9 +123,10 @@ jobs:
         total_sz = 0
         for r, _, fs in os.walk("data"):
             for fl in fs:
-                total_nc += 1
-                total_sz += os.path.getsize(os.path.join(r, fl))
-        print(f"Batch {BATCH} DONE: {ok} files ({total_sz/1e9:.1f}GB), skip={skip}, fail={fail}, empty={empty_ok}")
+                if fl.endswith('.nc'):
+                    total_nc += 1
+                    total_sz += os.path.getsize(os.path.join(r, fl))
+        print(f"Batch {BATCH} DONE: {ok} files ({total_sz/1e9:.2f}GB), skip={skip}, fail={fail}")
         PYEOF
 
     - name: Zip batch ${{ matrix.batch }}
