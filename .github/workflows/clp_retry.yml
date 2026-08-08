@@ -142,4 +142,4 @@ jobs:
       with:
         name: CLP_b${{ matrix.batch }}
         path: CLP_b${{ matrix.batch }}.zip
-        retention-days: 7
+        retention-days: 90
